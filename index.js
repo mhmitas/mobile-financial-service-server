@@ -30,10 +30,24 @@ const client = new MongoClient(uri, {
     }
 });
 
-async function run() {
-    const db = client.db("mh_fins")
-    const userColl = db.collection("users")
+const db = client.db("mh_fins")
+const userColl = db.collection("users")
 
+async function verifyJWT(req, res, next) {
+    const token = req.cookies?.token || req.headers?.authorization?.split(" ")[1]
+    if (!token) {
+        return res.status(401).send({ message: "unauthorize user" })
+    }
+    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+        if (err) {
+            return res.status(403).send({ message: "invalid token user | forbidden access" })
+        }
+        req.user = decoded;
+        next()
+    })
+}
+
+async function run() {
     try {
         // user related apis
         // register user
@@ -50,7 +64,7 @@ async function run() {
             // hash pin
             const hashedPin = await hashPassword(pin)
             // insert user in database
-            const result = await userColl.insertOne({ name, email, pin: hashedPin, number })
+            const result = await userColl.insertOne({ name, email, pin: hashedPin, number, role: "user" })
             console.log(result)
             // generate token 
             const token = await generateToken(name, email, number, result?.insertedId?.toString())
@@ -59,6 +73,56 @@ async function run() {
                 .cookie("token", token, cookieOptions)
                 .send(result)
         })
+        // log in user
+        app.post("/api/login", async (req, res) => {
+            const { email, number, pin } = req.body;
+            // check if all credentials are provided
+            if (!email && !number) {
+                return res.status(400).send({ message: "email or phone number required" })
+            }
+            if (!pin) {
+                return res.status(400).send({ message: "invalid pin" })
+            }
+            // find the user in db
+            const user = await userColl.findOne({ $or: [{ email }, { number }] })
+            if (!user) {
+                return res.status(404).send({ message: "Wrong credentials. User Not found" })
+            }
+            // verify pin
+            const verifyPin = await bcrypt.compare(pin, user?.pin);
+            if (!verifyPin) {
+                return res.status(401).send({ message: "Wrong Pin" })
+            }
+            // crate token
+            const token = await generateToken(user.name, user?.email, user?.number, user?._id.toString())
+            // prepare data to send---
+            // remove pin from user Object
+            delete user?.pin;
+            res
+                .status(200)
+                .cookie("token", token, cookieOptions)
+                .send(user)
+        })
+        // Logout
+        app.get('/api/logout', async (req, res) => {
+            try {
+                res
+                    .clearCookie('token', cookieOptions)
+                    .send({ success: true })
+                console.log('Logout successful')
+            } catch (err) {
+                res.status(500).send(err)
+            }
+        })
+        // get user
+        app.get("/api/user", verifyJWT, async (req, res) => {
+            console.log(req?.user)
+            const query = { email: req?.user?.email }
+            const options = { projection: { pin: 0 } }
+            const user = await userColl.findOne(query, options)
+            res.send(user)
+        })
+
 
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
@@ -90,7 +154,7 @@ async function generateToken(name, email, number, _id) {
 }
 async function hashPassword(password) {
     const hashedPassword = await bcrypt.hash(password, 10)
-    return hashedPassword
+    return hashedPassword;
 }
 
 const cookieOptions = {
