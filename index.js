@@ -18,8 +18,8 @@ app.use(cookieParser())
 
 
 
-// const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.jt5df8u.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
-const uri = "mongodb://localhost:27017";
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.jt5df8u.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+// const uri = "mongodb://localhost:27017";
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -106,7 +106,7 @@ async function run() {
                 .send(user)
         })
         // Logout
-        app.get('/api/logout', async (req, res) => {
+        app.post('/api/logout', async (req, res) => {
             try {
                 res
                     .clearCookie('token', cookieOptions)
@@ -134,6 +134,20 @@ async function run() {
             const result = await userColl.updateOne({ email }, updateDoc)
             res.status(200).send(result)
         })
+        // get total balance
+        app.get("/api/user/total-balance/:email", async (req, res) => {
+            const email = req.params.email;
+            const result = await balanceColl.findOne({ email })
+            res.send(result)
+        })
+
+
+        // agent related api's
+        app.get("/api/agent/total-balance/:email", async (req, res) => {
+            const email = req.params.email;
+            const result = await balanceColl.findOne({ email })
+            res.send(result)
+        })
 
 
         // admin related apis 
@@ -152,7 +166,6 @@ async function run() {
                 .status(200)
                 .send(result)
         })
-
         // approve a user 
         app.patch("/api/admin/approve-user/:email", async (req, res) => {
             const email = req.params?.email;
@@ -198,6 +211,84 @@ async function run() {
             res.status(200).send(result)
         })
 
+        // send money api
+        app.post("/api/send-money", async (req, res) => {
+            const { recipientNumber, senderNumber, senderPin, amount } = req.body;
+            if (recipientNumber === senderNumber) {
+                return res.status(400).send({ message: "You cannot send money to your own account" })
+            }
+            if (parseFloat(amount) < 50) {
+                return res.status(400).send({ message: "Less than 50 taka is not allowed" })
+            }
+            // get the sender data from db
+            const sender = await userColl.findOne({ number: senderNumber })
+            if (!sender) {
+                return res.status(404).send({ message: "sender not found" })
+            }
+            const verifyPin = await bcryptPinVerify(senderPin, sender?.pin)
+            if (!verifyPin) {
+                return res.status(400).send({ message: "Please give a valid pin" })
+            }
+            // get the recipient data form db
+            const recipient = await userColl.findOne({ number: recipientNumber })
+            if (!recipient) {
+                return res.status(404).send({ message: "recipient not found" })
+            }
+            // get the sender balance
+            const senderBalanceData = await balanceColl.findOne({ email: sender?.email })
+            let senderCurrentBalance = parseFloat(senderBalanceData?.balance)
+            // get the recipient balance
+            const recipientBalanceData = await balanceColl.findOne({ email: recipient?.email })
+            let recipientCurrentBalance = parseFloat(recipientBalanceData?.balance)
+            // cut money if payment is greater than 100
+            let charge = 0;
+            if (amount >= 100) {
+                senderCurrentBalance = senderCurrentBalance - 5;
+                charge = 5;
+            }
+            if (senderCurrentBalance < 40) {
+                return res.status(400).send({ message: "You don't sufficient balance to send money" })
+            }
+            if (senderCurrentBalance - parseFloat(amount) < 40) {
+                return res.status(400).send({ message: "Account must have at least 40 TK after sending money" })
+            }
+            // cut money from sender's balance and add to the recipient's balance
+            const senderNewBalance = senderCurrentBalance - parseFloat(amount)
+            const recipientNewBalance = recipientCurrentBalance + parseFloat(amount)
+            console.log({ senderCurrentBalance, senderNewBalance, recipientCurrentBalance, recipientNewBalance })
+
+            // update sender's balance
+            const updateSenderBalance = await balanceColl.updateOne(
+                { email: sender?.email },
+                { $set: { balance: senderNewBalance } }
+            )
+            // update recipient's balance
+            const updateRecipientBalance = await balanceColl.updateOne(
+                { email: recipient?.email },
+                { $set: { balance: recipientNewBalance } }
+            )
+            // create transaction
+            const senderTransactionDoc = {
+                senderEmail: sender?.email,
+                recipientName: recipient?.name,
+                recipientEmail: recipient?.email,
+                recipientNumber: recipient?.number,
+                amount: amount,
+                charge,
+                date: new Date()
+            }
+            recipientTransactionDoc = {
+                recipientEmail: recipient?.email,
+                senderName: sender?.name,
+                senderEmail: sender?.email,
+                senderNumber: sender?.number,
+                amount: amount,
+                date: new Date()
+            }
+            const transactionSaveResult = await transactionColl.insertMany([senderTransactionDoc, recipientTransactionDoc])
+            res.send({ updateSenderBalance, updateRecipientBalance, transactionSaveResult })
+        })
+
 
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
@@ -236,4 +327,9 @@ const cookieOptions = {
     httpOnly: true,
     sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
     secure: process.env.NODE_ENV === 'production' ? true : false
+}
+
+async function bcryptPinVerify(pin, hashedPin) {
+    const isVerified = await bcrypt.compare(pin, hashedPin)
+    return isVerified
 }
