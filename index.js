@@ -32,6 +32,8 @@ const client = new MongoClient(uri, {
 
 const db = client.db("mh_fins")
 const userColl = db.collection("users")
+const balanceColl = db.collection("balances")
+const transactionColl = db.collection("transactions")
 
 async function verifyJWT(req, res, next) {
     const token = req.cookies?.token || req.headers?.authorization?.split(" ")[1]
@@ -40,7 +42,7 @@ async function verifyJWT(req, res, next) {
     }
     jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
         if (err) {
-            return res.status(403).send({ message: "invalid token user | forbidden access" })
+            return res.status(403).send({ message: "invalid token, Mr. User | forbidden access" })
         }
         req.user = decoded;
         next()
@@ -115,11 +117,22 @@ async function run() {
             }
         })
         // get current user
-        app.get("/api/user", verifyJWT, async (req, res) => {
+        app.get("/api/current-user", verifyJWT, async (req, res) => {
             const query = { email: req?.user?.email }
             const options = { projection: { pin: 0 } }
             const user = await userColl.findOne(query, options)
             res.send(user)
+        })
+
+
+        // user related apis
+        // want to become an agent endpoint
+        app.patch("/api/user/become-agent-request/:email", async (req, res) => {
+            const email = req.params?.email
+            const { wantToBecomeAgent, message } = req.body;
+            const updateDoc = { $set: { wantToBecomeAgent, message } }
+            const result = await userColl.updateOne({ email }, updateDoc)
+            res.status(200).send(result)
         })
 
 
@@ -135,17 +148,53 @@ async function run() {
             }
             const options = { projection: { pin: 0 } }
             const result = await userColl.find(query, options).toArray()
-            console.log(req.query)
             res
                 .status(200)
                 .send(result)
         })
-        // update user role 
-        app.patch("/api/admin/update-user-role/:email", async (req, res) => {
+
+        // approve a user 
+        app.patch("/api/admin/approve-user/:email", async (req, res) => {
             const email = req.params?.email;
-            const { role, status } = req.body;
+            const { role, status = "verified", bonusAmount } = req.body;
+            // create a balance data for the user
+            const balance = {
+                balance: bonusAmount,
+                email: email,
+            }
+            const insertInBalanceColl = await balanceColl.insertOne(balance);
+            // create data to update user role from pending to user
             const updateDoc = { $set: { role, status } }
-            const result = await userColl.updateOne({ email }, updateDoc)
+            const updateUserRoleResult = await userColl.updateOne({ email }, updateDoc)
+            // send response
+            res.status(200).send({ updateUserRoleResult, insertInBalanceColl })
+        })
+        // change user role from user to agent 
+        app.patch("/api/admin/make-agent/:email", async (req, res) => {
+            const email = req.params?.email;
+            const { bonusAmount } = req.body;
+            // update users role
+            const updateDoc = {
+                $set: { role: "agent" },
+                $unset: { wantToBecomeAgent: "", message: "" }
+            }
+            const result = await userColl.updateOne({ email }, updateDoc);
+            // give bonus money
+            // get user's balance
+            const balance = await balanceColl.findOne({ email }, { projection: { balance: 1, _id: 0 } })
+            if (!balance) {
+                return res.status(404).send({ message: "account not found" })
+            }
+            const newBalance = parseFloat(bonusAmount) + parseFloat(balance?.balance)
+            // add bonus balance
+            const updateDoc2 = { $set: { balance: newBalance } }
+            const bonusResult = await balanceColl.updateOne({ email }, updateDoc2)
+            res.status(200).send({ result, bonusResult })
+        })
+        // get user's who are want to be agent
+        app.get("/api/admin/pending-agent-requests", async (req, res) => {
+            const query = { wantToBecomeAgent: true }
+            const result = await userColl.find(query, { projection: { pin: 0 } }).toArray()
             res.status(200).send(result)
         })
 
