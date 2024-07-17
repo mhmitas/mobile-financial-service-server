@@ -18,8 +18,8 @@ app.use(cookieParser())
 
 
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.jt5df8u.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
-// const uri = "mongodb://localhost:27017";
+// const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.jt5df8u.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+const uri = "mongodb://localhost:27017";
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -64,7 +64,7 @@ async function run() {
             // hash pin
             const hashedPin = await hashPassword(pin)
             // insert user in database
-            const result = await userColl.insertOne({ name, email, pin: hashedPin, number, role: "user" })
+            const result = await userColl.insertOne({ name, email, pin: hashedPin, number, role: "pending", status: "pending" })
             console.log(result)
             // generate token 
             const token = await generateToken(name, email, number, result?.insertedId?.toString())
@@ -114,13 +114,39 @@ async function run() {
                 res.status(500).send(err)
             }
         })
-        // get user
+        // get current user
         app.get("/api/user", verifyJWT, async (req, res) => {
-            console.log(req?.user)
             const query = { email: req?.user?.email }
             const options = { projection: { pin: 0 } }
             const user = await userColl.findOne(query, options)
             res.send(user)
+        })
+
+
+        // admin related apis 
+        // get all users
+        app.get("/api/admin/all-users", async (req, res) => {
+            let query = {}
+            if (req.query?.status) {
+                query = { ...query, status: req.query?.status }
+            }
+            if (req.query?.role) {
+                query = { ...query, role: req.query?.role }
+            }
+            const options = { projection: { pin: 0 } }
+            const result = await userColl.find(query, options).toArray()
+            console.log(req.query)
+            res
+                .status(200)
+                .send(result)
+        })
+        // update user role 
+        app.patch("/api/admin/update-user-role/:email", async (req, res) => {
+            const email = req.params?.email;
+            const { role, status } = req.body;
+            const updateDoc = { $set: { role, status } }
+            const result = await userColl.updateOne({ email }, updateDoc)
+            res.status(200).send(result)
         })
 
 
